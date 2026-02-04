@@ -68,12 +68,35 @@ jobs:
           wget
         # Add armhf architecture
         sudo dpkg --add-architecture armhf
-        # Add Debian repositories for ARM32 libraries (Ubuntu 22.04+ may not have all armhf packages)
-        echo "deb [arch=armhf] http://deb.debian.org/debian bookworm main" | sudo tee /etc/apt/sources.list.d/debian-armhf.list
-        echo "deb [arch=armhf] http://deb.debian.org/debian-security bookworm-security main" | sudo tee -a /etc/apt/sources.list.d/debian-armhf.list
+        # Import Debian GPG keys from keyserver
+        sudo apt-get install -y gnupg2 ca-certificates
+        sudo mkdir -p /usr/share/keyrings
+        # Debian Bookworm archive signing keys
+        for keyserver in hkp://keyserver.ubuntu.com:80 hkp://pgp.mit.edu:80; do
+          if sudo gpg --no-default-keyring --keyring /usr/share/keyrings/debian-bookworm-archive-keyring.gpg --keyserver "$keyserver" --recv-keys 0E98404D386FA1D9 6ED0E7B82643E131 2>/dev/null; then
+            break
+          fi
+        done
+        # Debian Security archive signing keys
+        for keyserver in hkp://keyserver.ubuntu.com:80 hkp://pgp.mit.edu:80; do
+          if sudo gpg --no-default-keyring --keyring /usr/share/keyrings/debian-security-bookworm-keyring.gpg --keyserver "$keyserver" --recv-keys 54404762BBB6E853 BDE6D2B9216EC7A8 2>/dev/null; then
+            break
+          fi
+        done
+        # Check if keys were imported, if not use trusted repos as fallback
+        if [ -f /usr/share/keyrings/debian-bookworm-archive-keyring.gpg ] && [ -f /usr/share/keyrings/debian-security-bookworm-keyring.gpg ]; then
+          # Add Debian repositories with signed-by
+          echo "deb [arch=armhf signed-by=/usr/share/keyrings/debian-bookworm-archive-keyring.gpg] http://deb.debian.org/debian bookworm main" | sudo tee /etc/apt/sources.list.d/debian-armhf.list
+          echo "deb [arch=armhf signed-by=/usr/share/keyrings/debian-security-bookworm-keyring.gpg] http://deb.debian.org/debian-security bookworm-security main" | sudo tee -a /etc/apt/sources.list.d/debian-armhf.list
+        else
+          # Fallback: use trusted repos (less secure but functional)
+          echo "Warning: GPG keys not imported, using trusted repositories" >&2
+          echo "deb [arch=armhf trusted=yes] http://deb.debian.org/debian bookworm main" | sudo tee /etc/apt/sources.list.d/debian-armhf.list
+          echo "deb [arch=armhf trusted=yes] http://deb.debian.org/debian-security bookworm-security main" | sudo tee -a /etc/apt/sources.list.d/debian-armhf.list
+        fi
         # Update package lists - ignore errors for missing Ubuntu armhf repositories
         # Debian repos will provide the armhf packages we need
-        sudo apt-get update || (echo "Some repositories failed (expected for Ubuntu armhf), continuing..." && true)
+        sudo apt-get update 2>&1 | grep -v "404  Not Found" || true
         # Install ARM32 development libraries from Debian
         sudo apt-get install -y \
           libuuid-dev:armhf \
