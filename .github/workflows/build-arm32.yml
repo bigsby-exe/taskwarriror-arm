@@ -1,0 +1,179 @@
+name: Build Taskwarrior for ARM32
+
+on:
+  schedule:
+    # Run weekly on Mondays at 00:00 UTC
+    - cron: '0 0 * * 1'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Taskwarrior version to build (e.g., 3.4.2). Leave empty for latest.'
+        required: false
+        type: string
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      
+    - name: Install GitHub CLI
+      run: |
+        curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg
+        echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null
+        sudo apt update
+        sudo apt install gh -y
+      
+    - name: Get latest Taskwarrior version
+      id: get_version
+      run: |
+        if [ -z "${{ github.event.inputs.version }}" ]; then
+          # Get the latest release version
+          VERSION=$(curl -s https://api.github.com/repos/GothenburgBitFactory/taskwarrior/releases/latest | grep '"tag_name":' | sed -E 's/.*"v?([^"]+)".*/\1/')
+        else
+          VERSION="${{ github.event.inputs.version }}"
+        fi
+        echo "version=$VERSION" >> $GITHUB_OUTPUT
+        echo "Building Taskwarrior version: $VERSION"
+        
+    - name: Check if release already exists
+      id: check_release
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        VERSION: ${{ steps.get_version.outputs.version }}
+      run: |
+        RELEASE_TAG="taskwarrior-${VERSION}-arm32"
+        if gh release view "$RELEASE_TAG" &>/dev/null; then
+          echo "Release $RELEASE_TAG already exists, skipping build"
+          echo "skip=true" >> $GITHUB_OUTPUT
+        else
+          echo "skip=false" >> $GITHUB_OUTPUT
+        fi
+      continue-on-error: true
+      
+    - name: Setup ARM32 cross-compilation toolchain
+      if: steps.check_release.outputs.skip != 'true'
+      run: |
+        sudo dpkg --add-architecture armhf
+        sudo apt-get update
+        sudo apt-get install -y \
+          gcc-arm-linux-gnueabihf \
+          g++-arm-linux-gnueabihf \
+          cmake \
+          make \
+          libuuid-dev:armhf \
+          libgnutls28-dev:armhf \
+          libreadline-dev:armhf \
+          uuid-dev:armhf \
+          pkg-config \
+          curl
+        
+    - name: Setup Rust toolchain for ARM32
+      if: steps.check_release.outputs.skip != 'true'
+      run: |
+        curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
+        echo "$HOME/.cargo/bin" >> $GITHUB_PATH
+        rustup target add armv7-unknown-linux-gnueabihf
+        
+    - name: Download Taskwarrior source
+      if: steps.check_release.outputs.skip != 'true'
+      env:
+        VERSION: ${{ steps.get_version.outputs.version }}
+      run: |
+        wget https://github.com/GothenburgBitFactory/taskwarrior/releases/download/v${VERSION}/task-${VERSION}.tar.gz
+        tar xzvf task-${VERSION}.tar.gz
+        
+    - name: Configure CMake for ARM32
+      if: steps.check_release.outputs.skip != 'true'
+      env:
+        VERSION: ${{ steps.get_version.outputs.version }}
+        CC: arm-linux-gnueabihf-gcc
+        CXX: arm-linux-gnueabihf-g++
+        PKG_CONFIG_PATH: /usr/lib/arm-linux-gnueabihf/pkgconfig
+        CARGO_TARGET_ARMV7_UNKNOWN_LINUX_GNUEABIHF_LINKER: arm-linux-gnueabihf-gcc
+      run: |
+        cd task-${VERSION}
+        cmake -S . -B build \
+          -DCMAKE_BUILD_TYPE=Release \
+          -DCMAKE_SYSTEM_NAME=Linux \
+          -DCMAKE_SYSTEM_PROCESSOR=armv7l \
+          -DCMAKE_C_COMPILER=arm-linux-gnueabihf-gcc \
+          -DCMAKE_CXX_COMPILER=arm-linux-gnueabihf-g++ \
+          -DCMAKE_FIND_ROOT_PATH=/usr/arm-linux-gnueabihf \
+          -DCMAKE_FIND_ROOT_PATH_MODE_PROGRAM=NEVER \
+          -DCMAKE_FIND_ROOT_PATH_MODE_LIBRARY=ONLY \
+          -DCMAKE_FIND_ROOT_PATH_MODE_INCLUDE=ONLY \
+          -DCMAKE_FIND_ROOT_PATH_MODE_PACKAGE=ONLY
+        
+    - name: Build Taskwarrior
+      if: steps.check_release.outputs.skip != 'true'
+      env:
+        VERSION: ${{ steps.get_version.outputs.version }}
+        CARGO_TARGET_ARMV7_UNKNOWN_LINUX_GNUEABIHF_LINKER: arm-linux-gnueabihf-gcc
+        PKG_CONFIG_PATH: /usr/lib/arm-linux-gnueabihf/pkgconfig
+      run: |
+        cd task-${VERSION}
+        cmake --build build --parallel $(nproc)
+        
+    - name: Install to staging directory
+      if: steps.check_release.outputs.skip != 'true'
+      env:
+        VERSION: ${{ steps.get_version.outputs.version }}
+      run: |
+        cd task-${VERSION}
+        mkdir -p ../install
+        DESTDIR=$(pwd)/../install cmake --install build
+        
+    - name: Create distribution package
+      if: steps.check_release.outputs.skip != 'true'
+      env:
+        VERSION: ${{ steps.get_version.outputs.version }}
+      run: |
+        cd install
+        tar czf ../taskwarrior-${VERSION}-arm32.tar.gz *
+        cd ..
+        echo "Package created: taskwarrior-${VERSION}-arm32.tar.gz"
+        ls -lh taskwarrior-${VERSION}-arm32.tar.gz
+        
+    - name: Create GitHub Release
+      if: steps.check_release.outputs.skip != 'true'
+      uses: softprops/action-gh-release@v1
+      with:
+        tag_name: taskwarrior-${{ steps.get_version.outputs.version }}-arm32
+        name: Taskwarrior ${{ steps.get_version.outputs.version }} (ARM32)
+        body: |
+          Pre-built Taskwarrior ${{ steps.get_version.outputs.version }} for ARM32 systems (armv7l).
+          
+          ## Installation Instructions
+          
+          ### For DietPi / Raspberry Pi (32-bit)
+          
+          1. Download the `taskwarrior-${{ steps.get_version.outputs.version }}-arm32.tar.gz` file
+          2. Extract the archive:
+             ```bash
+             tar xzvf taskwarrior-${{ steps.get_version.outputs.version }}-arm32.tar.gz
+             ```
+          3. Install:
+             ```bash
+             sudo cp -r usr/* /usr/
+             sudo ldconfig
+             ```
+          4. Verify installation:
+             ```bash
+             task --version
+             ```
+          
+          ## Build Information
+          
+          - Built on: ${{ github.run_id }}
+          - Source: Taskwarrior v${{ steps.get_version.outputs.version }}
+          - Target: ARM32 (armv7l, arm-linux-gnueabihf)
+          - Build Date: $(date -u +"%Y-%m-%d %H:%M:%S UTC")
+        files: |
+          taskwarrior-${{ steps.get_version.outputs.version }}-arm32.tar.gz
+        draft: false
+        prerelease: false
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
